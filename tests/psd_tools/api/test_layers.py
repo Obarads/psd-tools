@@ -1,3 +1,4 @@
+import io
 import logging
 from typing import Any, Optional, Tuple
 
@@ -252,6 +253,52 @@ def test_type_layer(type_layer: TypeLayer) -> None:
     assert type_layer.resource_dict
     assert type_layer.document_resources
     assert type_layer.warp
+
+
+def test_type_layer_set_text(type_layer: TypeLayer) -> None:
+    type_layer.text = "Hello"
+    assert type_layer.text == "Hello"
+    # The 'Txt ' descriptor is NUL-terminated; the engine text is CR-terminated.
+    assert type_layer._data.text_data.get(b"Txt ").value == "Hello\x00"
+    editor_text = type_layer.engine_dict.get("Editor").get("Text").value
+    assert editor_text == "Hello\r"
+    # Run-length totals must equal the engine text length.
+    style_lengths = [
+        x.value for x in type_layer.engine_dict.get("StyleRun").get("RunLengthArray")
+    ]
+    para_lengths = [
+        x.value
+        for x in type_layer.engine_dict.get("ParagraphRun").get("RunLengthArray")
+    ]
+    assert sum(style_lengths) == len(editor_text)
+    assert sum(para_lengths) == len(editor_text)
+
+
+def test_type_layer_set_text_normalizes_newlines(type_layer: TypeLayer) -> None:
+    type_layer.text = "a\nb\r\nc"
+    assert type_layer.text == "a\rb\rc"
+    para_lengths = [
+        x.value
+        for x in type_layer.engine_dict.get("ParagraphRun").get("RunLengthArray")
+    ]
+    # Three CR-delimited paragraphs, each counted with its trailing CR.
+    assert para_lengths == [2, 2, 2]
+
+
+def test_type_layer_set_text_roundtrip(type_layer: TypeLayer) -> None:
+    type_layer.text = "Round\ntrip"
+    psd = type_layer._psd
+    buf = io.BytesIO()
+    psd.save(buf)
+    buf.seek(0)
+    reopened = PSDImage.open(buf)
+    layer = next(layer for layer in reopened.descendants() if layer.kind == "type")
+    assert layer.text == "Round\rtrip"
+
+
+def test_type_layer_set_text_type_error(type_layer: TypeLayer) -> None:
+    with pytest.raises(TypeError):
+        type_layer.text = 123  # type: ignore[assignment]
 
 
 def test_group_writable_properties(group: Group) -> None:

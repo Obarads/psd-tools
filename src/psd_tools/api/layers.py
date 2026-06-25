@@ -1985,7 +1985,10 @@ class TypeLayer(Layer):
     Document styling information such as font list is is
     :py:attr:`~psd_tools.api.layers.TypeLayer.resource_dict`.
 
-    Currently, textual information is read-only.
+    The text string is writable via the :py:attr:`text` setter, which
+    updates the underlying engine data while preserving styling. Note that
+    psd-tools has no font engine, so the rasterized preview pixels are *not*
+    regenerated; Photoshop re-renders the layer when the file is reopened.
 
     Example::
 
@@ -2014,11 +2017,105 @@ class TypeLayer(Layer):
     @property
     def text(self) -> str:
         """
-        Text in the layer. Read-only.
+        Text in the layer. Writable.
 
-        .. note:: New-line character in Photoshop is `'\\\\r'`.
+        Setting this replaces the layer's text string while keeping the
+        existing character and paragraph styling. The character style of the
+        first run is applied across the whole string (multi-style runs are
+        collapsed); paragraph styling is preserved per paragraph, reusing the
+        last paragraph's style for any extra paragraphs.
+
+        .. note::
+            New-line character in Photoshop is ``'\\r'``. For convenience the
+            setter also accepts ``'\\n'`` and ``'\\r\\n'`` and normalizes them
+            to ``'\\r'``.
+
+        .. warning::
+            Because psd-tools cannot render fonts, the rasterized preview
+            pixels stored in the layer are left untouched. Applications that
+            rely on the cached pixels (including :py:meth:`composite`) will
+            show the *old* text until Photoshop re-renders the layer. The
+            layer bounding box is likewise not recomputed.
         """
         return self._data.text_data.get(b"Txt ").value.rstrip("\x00")
+
+    @text.setter
+    def text(self, value: str) -> None:
+        if self._data is None:
+            raise ValueError(
+                "This type layer has no TYPE_TOOL_OBJECT_SETTING block to edit."
+            )
+        if not isinstance(value, str):
+            raise TypeError(f"Expected str, got {type(value).__name__}")
+
+        # Photoshop separates lines with CR ('\r'). Accept the common '\n' and
+        # '\r\n' forms and normalize to CR, then strip any trailing separator
+        # since the engine manages its own terminator.
+        body = value.replace("\r\n", "\r").replace("\n", "\r").rstrip("\r")
+        # The 'Txt ' descriptor is NUL-terminated; the engine editor text is
+        # CR-terminated.
+        engine_text = body + "\r"
+
+        # 1. Update the user-visible descriptor text and the engine editor text.
+        self._data.text_data.get(b"Txt ").value = body + "\x00"
+        editor = self.engine_dict.get("Editor")
+        if editor is not None and "Text" in editor:
+            editor.get("Text").value = engine_text
+
+        # 2. Resize the character-style runs to span the new text.
+        self._resize_style_run(self.engine_dict.get("StyleRun"), len(engine_text))
+
+        # 3. Rebuild paragraph runs from the CR-delimited paragraphs.
+        self._resize_paragraph_run(self.engine_dict.get("ParagraphRun"), engine_text)
+
+        # Invalidate the cached structured view.
+        if hasattr(self, "_typesetting"):
+            del self._typesetting
+
+        self._psd._mark_updated()
+
+    @staticmethod
+    def _resize_style_run(style_run: engine_data.Dict | None, total: int) -> None:
+        """Collapse character-style runs to the first style spanning *total*."""
+        if style_run is None:
+            return
+        run_array = style_run.get("RunArray")
+        if run_array is None or len(run_array) == 0:
+            return
+        if len(run_array) > 1:
+            logger.warning(
+                "Collapsing %d character-style runs to the first style "
+                "when setting text.",
+                len(run_array),
+            )
+        new_runs = engine_data.List()
+        new_runs.append(run_array[0])
+        new_lengths = engine_data.List()
+        new_lengths.append(engine_data.Integer(total))
+        style_run["RunArray"] = new_runs
+        style_run["RunLengthArray"] = new_lengths
+
+    @staticmethod
+    def _resize_paragraph_run(
+        para_run: engine_data.Dict | None, engine_text: str
+    ) -> None:
+        """Rebuild paragraph runs, one per CR-delimited paragraph."""
+        if para_run is None:
+            return
+        run_array = para_run.get("RunArray")
+        if run_array is None or len(run_array) == 0:
+            return
+        # Splitting CR-terminated text yields a trailing empty segment to drop.
+        segments = engine_text.split("\r")[:-1]
+        new_runs = engine_data.List()
+        new_lengths = engine_data.List()
+        for i, segment in enumerate(segments):
+            # Reuse paragraph style by index; pad extra paragraphs with the last.
+            src = run_array[i] if i < len(run_array) else run_array[len(run_array) - 1]
+            new_runs.append(src)
+            new_lengths.append(engine_data.Integer(len(segment) + 1))
+        para_run["RunArray"] = new_runs
+        para_run["RunLengthArray"] = new_lengths
 
     @property
     def text_type(self) -> TextType | None:
