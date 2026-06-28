@@ -2117,6 +2117,91 @@ class TypeLayer(Layer):
         para_run["RunArray"] = new_runs
         para_run["RunLengthArray"] = new_lengths
 
+    def set_text(
+        self,
+        text: str,
+        font: str | None = None,
+        size: float | None = None,
+    ) -> None:
+        """
+        Replace the text and, optionally, the font and font size.
+
+        This is a convenience wrapper over the :py:attr:`text` setter that also
+        lets you change the character font and size in one call.
+
+        Example::
+
+            layer.set_text("Hello", font="Helvetica-Bold", size=48)
+
+        :param text: New text. ``'\\n'`` / ``'\\r\\n'`` are normalized to
+            Photoshop's ``'\\r'``.
+        :param font: PostScript font name (e.g. ``"Helvetica-Bold"``, NOT the
+            display name ``"Helvetica"``). The font is added to the document
+            ``FontSet`` if absent and applied to every character-style run.
+        :param size: Font size in points, applied to every character-style run.
+
+        .. warning::
+            psd-tools has no font engine, so the rasterized preview pixels are
+            not regenerated and the bounding box is not recomputed. Photoshop
+            re-renders the layer on reopen, provided the chosen font is
+            installed there. See the :py:attr:`text` setter for details.
+        """
+        self.text = text
+        if font is not None:
+            self._set_run_font(font)
+        if size is not None:
+            self._set_run_font_size(size)
+        if font is not None or size is not None:
+            if hasattr(self, "_typesetting"):
+                del self._typesetting
+            self._psd._mark_updated()
+
+    def _find_or_add_font(self, postscript_name: str) -> int:
+        """Return the FontSet index for *postscript_name*, adding it if absent."""
+        fontset = self.resource_dict.get("FontSet")
+        if fontset is None:
+            raise ValueError("This type layer has no FontSet to edit.")
+        for index, entry in enumerate(fontset):
+            name = entry.get("Name")
+            if name is not None and name.value == postscript_name:
+                return index
+        entry = engine_data.Dict()
+        entry["Name"] = engine_data.String(postscript_name)
+        entry["Script"] = engine_data.Integer(0)
+        # FontType/Synthetic are hints; Photoshop refreshes them from the
+        # installed font when the layer is re-rendered.
+        entry["FontType"] = engine_data.Integer(1)
+        entry["Synthetic"] = engine_data.Integer(0)
+        fontset.append(entry)
+        return len(fontset) - 1
+
+    def _iter_style_sheet_data(self) -> Iterator[engine_data.Dict]:
+        """Yield the StyleSheetData dict of every character-style run."""
+        style_run = self.engine_dict.get("StyleRun")
+        if style_run is None:
+            return
+        run_array = style_run.get("RunArray")
+        if run_array is None:
+            return
+        for run in run_array:
+            sheet = run.get("StyleSheet")
+            if sheet is None:
+                continue
+            data = sheet.get("StyleSheetData")
+            if data is not None:
+                yield data
+
+    def _set_run_font(self, postscript_name: str) -> None:
+        """Point every character-style run at *postscript_name*."""
+        index = self._find_or_add_font(postscript_name)
+        for data in self._iter_style_sheet_data():
+            data["Font"] = engine_data.Integer(index)
+
+    def _set_run_font_size(self, size: float) -> None:
+        """Set the font size of every character-style run."""
+        for data in self._iter_style_sheet_data():
+            data["FontSize"] = engine_data.Float(float(size))
+
     @property
     def text_type(self) -> TextType | None:
         """

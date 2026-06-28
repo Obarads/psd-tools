@@ -301,6 +301,54 @@ def test_type_layer_set_text_type_error(type_layer: TypeLayer) -> None:
         type_layer.text = 123  # type: ignore[assignment]
 
 
+def _first_style_sheet_data(layer: TypeLayer) -> Any:
+    run = layer.engine_dict.get("StyleRun").get("RunArray")[0]
+    return run.get("StyleSheet").get("StyleSheetData")
+
+
+def test_type_layer_set_text_only(type_layer: TypeLayer) -> None:
+    # set_text without font/size behaves like the text setter.
+    type_layer.set_text("Just text")
+    assert type_layer.text == "Just text"
+
+
+def test_type_layer_set_text_with_font(type_layer: TypeLayer) -> None:
+    type_layer.set_text("Hello", font="Helvetica-Bold")
+    assert type_layer.text == "Hello"
+    assert type_layer.font_names == ["Helvetica-Bold"]
+    fontset = [f.get("Name").value for f in type_layer.resource_dict.get("FontSet")]
+    assert "Helvetica-Bold" in fontset
+    # The run's Font index points at the new font in FontSet.
+    index = _first_style_sheet_data(type_layer).get("Font").value
+    assert fontset[index] == "Helvetica-Bold"
+
+
+def test_type_layer_set_text_with_size(type_layer: TypeLayer) -> None:
+    type_layer.set_text("Hello", size=48)
+    assert _first_style_sheet_data(type_layer).get("FontSize").value == 48.0
+
+
+def test_type_layer_set_text_font_not_duplicated(type_layer: TypeLayer) -> None:
+    before = len(type_layer.resource_dict.get("FontSet"))
+    type_layer.set_text("A", font="Helvetica-Bold")
+    type_layer.set_text("B", font="Helvetica-Bold")
+    after = len(type_layer.resource_dict.get("FontSet"))
+    # The font is added once, not on every call.
+    assert after == before + 1
+
+
+def test_type_layer_set_text_font_size_roundtrip(type_layer: TypeLayer) -> None:
+    type_layer.set_text("Round\ntrip", font="Helvetica-Bold", size=36)
+    buf = io.BytesIO()
+    type_layer._psd.save(buf)
+    buf.seek(0)
+    reopened = PSDImage.open(buf)
+    layer = next(layer for layer in reopened.descendants() if layer.kind == "type")
+    assert layer.text == "Round\rtrip"
+    assert layer.font_names == ["Helvetica-Bold"]
+    assert _first_style_sheet_data(layer).get("FontSize").value == 36.0
+
+
 def test_group_writable_properties(group: Group) -> None:
     assert group.blend_mode == BlendMode.PASS_THROUGH
     group.blend_mode = BlendMode.SCREEN
