@@ -51,6 +51,22 @@ def main() -> None:
     output = args.output or args.tiff.with_suffix(".psd")
 
     im = Image.open(args.tiff)
+    n_frames = getattr(im, "n_frames", 1)
+    print(f"[input] {args.tiff}  ({n_frames} page(s))")
+    if n_frames == 1:
+        # The most common reason a conversion ends up with a single layer:
+        # the TIFF is flat (one page). PSDImage.frompil() also always flattens.
+        print(
+            "[warn] this TIFF has only ONE page, so the PSD will have a single "
+            "layer.\n"
+            "       To get multiple layers, export a MULTI-PAGE TIFF (one page "
+            "per\n"
+            "       element). Note: Photoshop-style layers stored in a private "
+            "TIFF\n"
+            "       tag are not exposed as pages by Pillow and cannot be read "
+            "here."
+        )
+
     pages = []
     for i, frame in enumerate(ImageSequence.Iterator(im)):
         # Per-page name: explicit --names wins, else ImageDescription, else default.
@@ -78,7 +94,16 @@ def main() -> None:
         print(f"[layer] {name!r}")
 
     psd.save(output)
-    print(f"[psd] {output}  ({len(pages)} layers, {width}x{height})")
+
+    # Verify by reopening: confirm every page became a real layer.
+    reopened = PSDImage.open(output)
+    saved_layers = list(reopened.descendants())
+    print(f"[psd] {output}  ({len(saved_layers)} layers, {width}x{height})")
+    if len(saved_layers) != len(pages):
+        print(
+            f"[warn] expected {len(pages)} layers but the saved PSD has "
+            f"{len(saved_layers)}."
+        )
 
 
 if __name__ == "__main__":
